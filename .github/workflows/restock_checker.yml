@@ -2,8 +2,11 @@ name: Pokémon Restock Checker
 
 on:
   schedule:
-    - cron: "0 * * * *"  # every hour
-  workflow_dispatch:      # manual trigger from GitHub UI
+    - cron: "*/15 * * * *"  # every 15 minutes
+  workflow_dispatch:          # manual trigger from GitHub UI
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   check-stock:
@@ -11,18 +14,18 @@ jobs:
 
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Install dependencies
         run: pip install requests beautifulsoup4
 
       - name: Restore last known state
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: last_state.json
           key: restock-state-${{ github.run_id }}
@@ -36,7 +39,7 @@ jobs:
         run: python checker.py
 
       - name: Save updated state
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         if: always()
         with:
           path: last_state.json
