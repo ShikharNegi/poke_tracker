@@ -88,7 +88,7 @@ IN_SIGNALS  = ["add to cart", "add to basket", "add to trolley", "add to bag", "
 
 # Site-specific card selectors
 SITE_CARD_SELECTORS = {
-    "toyful.ie":         ["li.grid__item", ".grid__item", "li[class*='grid']", ".product-item"],
+    "toyful.ie":         [".grid-product__wrapper", ".grid-product", "li.grid__item", ".grid__item"],
     "eirehobbies.com":   ["li.grid__item", ".grid__item", ".product-item"],
     "discarded.ie":      ["li.grid__item", ".grid__item", ".product-item"],
     "easons.com":        [".product-item", ".item", "li.item", ".product-card"],
@@ -145,8 +145,8 @@ def scrape_search_results(site, set_name):
             url   = absolute_url(link["href"] if link else None, domain)
             if not url or url in seen_urls:
                 continue
-            title_tag = (card.find(["h2", "h3", "h4"]) or
-                         card.find(class_=re.compile(r"title|name", re.I)) or
+            title_tag = (card.find(class_=re.compile(r"title|name", re.I)) or
+                         card.find(["h2", "h3", "h4"]) or
                          card.find("a"))
             title = title_tag.get_text(strip=True) if title_tag else card_text[:80]
             price_tag = card.find(class_=re.compile(r"price", re.I))
