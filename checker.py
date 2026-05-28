@@ -1,11 +1,12 @@
 import json
 import os
 import re
+import time
+import random
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
 
-# ── Load config ────────────────────────────────────────────────────────────────
 with open("products.json") as f:
     config = json.load(f)
 
@@ -15,31 +16,41 @@ TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]
 STATE_FILE         = "last_state.json"
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "en-IE,en;q=0.9",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-}
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+]
 
-# ══════════════════════════════════════════════════════════════════════════════
-# HELPERS
-# ══════════════════════════════════════════════════════════════════════════════
+def get_headers():
+    return {
+        "User-Agent":                random.choice(USER_AGENTS),
+        "Accept-Language":           "en-IE,en-GB;q=0.9,en;q=0.8",
+        "Accept":                    "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Encoding":           "gzip, deflate, br",
+        "Connection":                "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Cache-Control":             "max-age=0",
+    }
 
-def fetch(url, timeout=15):
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=timeout)
-        return r
-    except Exception as e:
-        print(f"      ⚠ Fetch error: {e}")
-        return None
+def is_bot_blocked(r):
+    if not r or r.status_code in (403, 429, 503):
+        return True
+    return any(p in r.text.lower() for p in [
+        "pardon our interruption", "access denied",
+        "please verify you are a human", "too many requests",
+        "ddos-guard", "are you a robot",
+    ])
+
+def polite_delay():
+    time.sleep(random.uniform(1.5, 3.5))
 
 def keywords_from_set(set_name):
-    stopwords = {"the", "a", "an", "and", "or", "for", "of", "in", "to", "&", "pokemon", "trading", "card", "game", "tcg"}
-    return [w.lower() for w in re.split(r"\W+", set_name) if w and w.lower() not in stopwords]
+    stopwords = {"the","a","an","and","or","for","of","in","to","&",
+                 "pokemon","trading","card","game","tcg","pocket"}
+    return [w.lower() for w in re.split(r"\W+", set_name)
+            if w and w.lower() not in stopwords]
 
 def text_matches(text, set_name):
     return all(w in text.lower() for w in keywords_from_set(set_name))
@@ -47,45 +58,65 @@ def text_matches(text, set_name):
 def absolute_url(href, domain):
     if not href:
         return None
+    href = href.split("?")[0]
     if href.startswith("http"):
         return href
-    return f"https://www.{domain}{href}" if href.startswith("/") else None
+    if href.startswith("/"):
+        return f"https://www.{domain}{href}"
+    return None
 
+OUT_SIGNALS = ["out of stock","sold out","unavailable",
+               "notify me when available","currently unavailable",
+               "temporarily out of stock"]
+IN_SIGNALS  = ["add to cart","add to basket","add to trolley","add to bag","buy now"]
 
-# ══════════════════════════════════════════════════════════════════════════════
-# STEP 1 — SCRAPE SEARCH PAGE → collect product URLs
-# ══════════════════════════════════════════════════════════════════════════════
-
-# Smyths-specific: product cards are <li> with data-product or class product-card
 CARD_SELECTORS = [
-    ".product-tile", ".product-card", ".product-item",
-    "[class*='product-tile']", "[class*='product-card']", "[class*='product-item']",
-    "article[class*='product']",
-    "li[class*='item']", "li[class*='product']",
-    ".grid-product", ".collection-product",
+    ".product-tile",".product-card",".product-item",
+    "[class*='product-tile']","[class*='product-card']","[class*='product-item']",
+    "article[class*='product']","li[class*='item']","li[class*='product']",
+    ".grid-product",".collection-product",".item",
 ]
 
-def scrape_search_results(site, set_name):
-    """
-    Hit the site's search page and return a list of product dicts:
-    [{title, url, price}]  — only products matching the set name.
-    """
-    template = site.get("search_url")
-    if not template:
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SMYTHS SESSION — visits homepage first to get cookies, then searches
+# ══════════════════════════════════════════════════════════════════════════════
+
+def make_smyths_session():
+    """Create a requests session that looks like a real browser to Smyths."""
+    session = requests.Session()
+    session.headers.update(get_headers())
+    try:
+        print("      🍪 Getting Smyths cookies...")
+        session.get("https://www.smythstoys.com/ie/en-ie/",
+                    timeout=15, allow_redirects=True)
+        polite_delay()
+        session.headers["Referer"] = "https://www.smythstoys.com/ie/en-ie/"
+    except Exception as e:
+        print(f"      ⚠ Could not load Smyths homepage: {e}")
+    return session
+
+def smyths_search(session, set_name):
+    """Search Smyths and return product cards matching the set name."""
+    search_url = f"https://www.smythstoys.com/ie/en-ie/search?text={requests.utils.quote(set_name)}"
+    try:
+        r = session.get(search_url, timeout=20)
+    except Exception as e:
+        print(f"      ⚠ Smyths search error: {e}")
         return []
 
-    search_url = template.format(query=requests.utils.quote(set_name))
-    r = fetch(search_url)
-    if not r or not r.ok:
-        print(f"      ⚠ Search page failed ({r.status_code if r else 'no response'})")
+    if is_bot_blocked(r):
+        print("      🚫 Smyths is blocking — will retry next run")
         return []
 
     soup = BeautifulSoup(r.text, "html.parser")
-    domain = site["domain"]
-    products = []
+    for tag in soup.select("nav,header,footer,script,style,noscript"):
+        tag.decompose()
+
+    products  = []
     seen_urls = set()
 
-    # Try structured card selectors first
+    # Smyths uses <li class="product ..."> cards
     for sel in CARD_SELECTORS:
         cards = soup.select(sel)
         if not cards:
@@ -94,249 +125,291 @@ def scrape_search_results(site, set_name):
             card_text = card.get_text(" ", strip=True)
             if not text_matches(card_text, set_name):
                 continue
-            # Title
-            title_tag = (card.find(["h2","h3","h4"]) or
-                         card.find(class_=re.compile(r"title|name", re.I)) or
-                         card.find("a"))
-            title = title_tag.get_text(strip=True) if title_tag else card_text[:80]
-            # URL
             link = card.find("a", href=True)
-            url = absolute_url(link["href"] if link else None, domain)
+            url  = absolute_url(link["href"] if link else None, "smythstoys.com")
             if not url or url in seen_urls:
                 continue
-            # Price
+            title_tag = card.find(["h2","h3","h4"]) or card.find("a")
+            title = title_tag.get_text(strip=True) if title_tag else card_text[:80]
             price_tag = card.find(class_=re.compile(r"price", re.I))
-            price = price_tag.get_text(strip=True) if price_tag else ""
+            price = ""
+            if price_tag:
+                m = re.search(r"€[\d,]+\.?\d*", price_tag.get_text())
+                price = m.group(0) if m else ""
             seen_urls.add(url)
             products.append({"title": title, "url": url, "price": price})
         if products:
-            break  # stop at first selector that yields results
+            break
 
-    # Fallback: grab all <a> tags whose text matches the set name
+    # Fallback to matching <a> tags
     if not products:
         for a in soup.find_all("a", href=True):
-            href = absolute_url(a["href"], domain)
-            if not href or href in seen_urls:
+            url = absolute_url(a["href"], "smythstoys.com")
+            if not url or url in seen_urls:
                 continue
             link_text = a.get_text(strip=True)
             if text_matches(link_text, set_name) and len(link_text) > 15:
-                seen_urls.add(href)
-                products.append({"title": link_text, "url": href, "price": ""})
+                seen_urls.add(url)
+                products.append({"title": link_text, "url": url, "price": ""})
 
     return products
 
+def smyths_check_product(session, product):
+    """Fetch individual Smyths product page and get stock status."""
+    polite_delay()
+    try:
+        r = session.get(product["url"], timeout=20)
+    except Exception as e:
+        print(f"      ⚠ Error: {e}")
+        product["status"] = "unknown"
+        return product
+
+    if is_bot_blocked(r):
+        product["status"] = "blocked"
+        return product
+
+    soup = BeautifulSoup(r.text, "html.parser")
+
+    # Update price from product page if we didn't get it from search
+    if not product.get("price"):
+        price_tag = soup.find("span", class_=re.compile(r"price", re.I))
+        if price_tag:
+            m = re.search(r"€[\d,]+\.?\d*", price_tag.get_text())
+            product["price"] = m.group(0) if m else ""
+
+    btn = soup.find("button", {"id": "addToCartBtn"})
+    if btn:
+        product["status"] = "out_of_stock" if btn.get("disabled") else "in_stock"
+    elif soup.find(string=lambda t: t and "out of stock" in t.lower()):
+        product["status"] = "out_of_stock"
+    else:
+        product["status"] = "unknown"
+
+    return product
+
+def check_smyths_for_set(set_name):
+    session  = make_smyths_session()
+    print(f"    🔎 Searching Smyths for '{set_name}'...")
+    products = smyths_search(session, set_name)
+
+    if not products:
+        print("       No products found")
+        return []
+
+    print(f"       Found {len(products)} product(s), checking each...")
+    results = []
+    for p in products:
+        p = smyths_check_product(session, p)
+        icon = {"in_stock":"✅","out_of_stock":"❌","blocked":"🚫"}.get(p["status"],"❓")
+        print(f"      {icon} {p['title'][:60]} — {p.get('price') or 'no price'}")
+        results.append(p)
+    return results
+
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STEP 2 — CHECK INDIVIDUAL PRODUCT PAGE → get stock status + price
+# GENERIC SEARCH-BASED SITES
 # ══════════════════════════════════════════════════════════════════════════════
 
-OUT_SIGNALS = ["out of stock", "sold out", "unavailable",
-               "notify me when available", "currently unavailable",
-               "temporarily out of stock"]
-IN_SIGNALS  = ["add to cart", "add to basket", "add to trolley",
-               "add to bag", "buy now", "in stock", "add to wishlist"]
+def scrape_search_results(site, set_name):
+    template = site.get("search_url","")
+    if not template:
+        return []
 
-def get_stock_status(site, product_url):
-    """
-    Fetch a product page and return:
-      status: "in_stock" | "out_of_stock" | "unknown"
-      price:  string or ""
-    """
-    r = fetch(product_url)
-    if not r:
-        return "unknown", ""
-    if r.status_code in (404, 410):
-        return "out_of_stock", ""
-    if not r.ok:
-        return "unknown", ""
+    search_url = template.format(query=requests.utils.quote(set_name))
+    polite_delay()
+    try:
+        r = requests.get(search_url, headers=get_headers(), timeout=20)
+    except Exception as e:
+        print(f"      ⚠ Fetch error: {e}")
+        return []
+
+    if is_bot_blocked(r) or not r.ok:
+        print(f"      ⚠ Search blocked or failed ({r.status_code if r else 'no response'})")
+        return []
 
     soup = BeautifulSoup(r.text, "html.parser")
     domain = site["domain"]
+    for tag in soup.select("nav,header,footer,script,style,noscript"):
+        tag.decompose()
 
-    # ── Site-specific logic ──────────────────────────────────────────────────
-    if "smythstoys" in domain:
-        # Smyths: "addToCartBtn" button is disabled when OOS
-        btn = soup.find("button", {"id": "addToCartBtn"})
-        if btn:
-            status = "out_of_stock" if btn.get("disabled") else "in_stock"
-        elif soup.find(string=lambda t: t and "out of stock" in t.lower()):
-            status = "out_of_stock"
-        else:
-            status = "unknown"
+    products  = []
+    seen_urls = set()
 
-    elif "argos" in domain:
-        if soup.find("button", string=lambda t: t and "add to trolley" in t.lower()):
-            status = "in_stock"
-        elif soup.find(string=lambda t: t and ("out of stock" in t.lower() or "unavailable" in t.lower())):
-            status = "out_of_stock"
-        else:
-            status = "unknown"
+    for sel in CARD_SELECTORS:
+        cards = soup.select(sel)
+        if not cards:
+            continue
+        for card in cards:
+            card_text = card.get_text(" ", strip=True)
+            if not text_matches(card_text, set_name):
+                continue
+            link  = card.find("a", href=True)
+            url   = absolute_url(link["href"] if link else None, domain)
+            if not url or url in seen_urls:
+                continue
+            title_tag = (card.find(["h2","h3","h4"]) or
+                         card.find(class_=re.compile(r"title|name",re.I)) or
+                         card.find("a"))
+            title = title_tag.get_text(strip=True) if title_tag else card_text[:80]
+            price_tag = card.find(class_=re.compile(r"price",re.I))
+            price = ""
+            if price_tag:
+                m = re.search(r"€[\d,]+\.?\d*", price_tag.get_text())
+                price = m.group(0) if m else ""
+            seen_urls.add(url)
+            products.append({"title": title, "url": url, "price": price})
+        if products:
+            break
 
-    elif "discarded" in domain:
-        # Discarded sometimes shows OOS
-        sold_out = soup.find(class_=re.compile(r"sold.?out", re.I)) or \
-                   soup.find(string=lambda t: t and "sold out" in t.lower())
-        atc = soup.find("button", string=lambda t: t and "add to cart" in t.lower())
-        if sold_out:
-            status = "out_of_stock"
-        elif atc and not atc.get("disabled"):
-            status = "in_stock"
-        else:
-            status = "unknown"
+    if not products:
+        for a in soup.find_all("a", href=True):
+            url = absolute_url(a["href"], domain)
+            if not url or url in seen_urls:
+                continue
+            link_text = a.get_text(strip=True)
+            if text_matches(link_text, set_name) and len(link_text) > 15:
+                seen_urls.add(url)
+                products.append({"title": link_text, "url": url, "price": ""})
 
-    else:
-        # Generic fallback
-        text = soup.get_text().lower()
-        status = "unknown"
-        for sig in OUT_SIGNALS:
-            if sig in text:
-                status = "out_of_stock"
-                break
-        if status == "unknown":
-            for sig in IN_SIGNALS:
-                if sig in text:
-                    status = "in_stock"
-                    break
+    return products
 
-    # ── Extract price ────────────────────────────────────────────────────────
+def get_page_stock_status(site, url):
+    polite_delay()
+    try:
+        r = requests.get(url, headers=get_headers(), timeout=20)
+    except Exception as e:
+        return "unknown", ""
+
+    if not r or r.status_code in (404, 410):
+        return "out_of_stock", ""
+    if is_bot_blocked(r) or not r.ok:
+        return "unknown", ""
+
+    soup   = BeautifulSoup(r.text, "html.parser")
+    domain = site["domain"]
+    text   = soup.get_text().lower()
+
     price = ""
-    price_tag = (soup.find(class_=re.compile(r"(^|\s)price(\s|$)", re.I)) or
-                 soup.find("span", string=re.compile(r"€\d")))
+    price_tag = soup.find(class_=re.compile(r"(^|\b)price(\b|$)",re.I))
     if price_tag:
-        price = price_tag.get_text(strip=True)
-        # Clean up: keep only the first price-like token
-        match = re.search(r"€[\d,]+\.?\d*", price)
-        price = match.group(0) if match else price[:20]
+        m = re.search(r"€[\d,]+\.?\d*", price_tag.get_text())
+        price = m.group(0) if m else ""
 
-    return status, price
+    # Shopify sites (Eire Hobbies, Discarded, Toyful etc.)
+    if any(d in domain for d in ["eirehobbies","discarded","toyful"]):
+        sold = (soup.find(class_=re.compile(r"sold.?out",re.I)) or
+                soup.find("button", string=re.compile(r"sold out",re.I)) or
+                soup.find(string=lambda t: t and "sold out" in t.lower()))
+        atc  = soup.find("button", string=re.compile(r"add to cart",re.I))
+        if sold:
+            return "out_of_stock", price
+        if atc and not atc.get("disabled"):
+            return "in_stock", price
+        return "unknown", price
 
+    # Generic
+    for sig in OUT_SIGNALS:
+        if sig in text:
+            return "out_of_stock", price
+    for sig in IN_SIGNALS:
+        if sig in text:
+            return "in_stock", price
+    return "unknown", price
 
-# ══════════════════════════════════════════════════════════════════════════════
-# STEP 3 — COMBINE: search → per-product status check
-# ══════════════════════════════════════════════════════════════════════════════
-
-def check_site_for_set(site, set_name):
-    """
-    Returns list of all products found for this set on this site,
-    each with their individual stock status:
-    [{title, url, price, status}]
-    """
-    method = site.get("method", "search")
-    products = []
-
-    # --- Smyths: use pre-configured URLs (user already found them)
-    if method == "page" and site.get("urls"):
-        for url in site["urls"]:
-            # We already know these are Chaos Rising etc — skip keyword filter
-            status, price = get_stock_status(site, url)
-            # Get title from page
-            r = fetch(url)
-            title = url
-            if r and r.ok:
-                s = BeautifulSoup(r.text, "html.parser")
-                h = s.find("h1")
-                if h:
-                    title = h.get_text(strip=True)
-            products.append({"title": title, "url": url,
-                             "price": price, "status": status})
-        return products
-
-    # --- Search-based sites: discover products first, then check each page
+def check_search_site_for_set(site, set_name):
     print(f"    🔎 Searching {site['name']} for '{set_name}'...")
     found = scrape_search_results(site, set_name)
     if not found:
-        print(f"       No products found in search results")
+        print("       No products found")
         return []
 
     print(f"       Found {len(found)} product(s), checking each...")
+    products = []
     for p in found:
-        status, price = get_stock_status(site, p["url"])
-        # Use price from product page if search didn't find one
+        status, price = get_page_stock_status(site, p["url"])
         if not p["price"] and price:
             p["price"] = price
         p["status"] = status
-        icon = "✅" if status == "in_stock" else "❌" if status == "out_of_stock" else "❓"
-        print(f"       {icon} {p['title'][:60]} — {p['price'] or 'no price'}")
+        icon = {"in_stock":"✅","out_of_stock":"❌"}.get(status,"❓")
+        print(f"      {icon} {p['title'][:60]} — {p.get('price') or 'no price'}")
         products.append(p)
-
     return products
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DISPATCHER
+# ══════════════════════════════════════════════════════════════════════════════
+
+def check_site_for_set(site, set_name):
+    if "smythstoys" in site["domain"]:
+        return check_smyths_for_set(set_name)
+    return check_search_site_for_set(site, set_name)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TELEGRAM
 # ══════════════════════════════════════════════════════════════════════════════
 
-STATUS_EMOJI = {"in_stock": "✅", "out_of_stock": "❌", "unknown": "❓"}
+STATUS_EMOJI = {"in_stock":"✅","out_of_stock":"❌","blocked":"🚫","unknown":"❓"}
 
-def send_telegram(messages):
-    """messages: list of text blocks to send (split if too long)."""
-    for text in messages:
-        r = requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={
-                "chat_id":                  TELEGRAM_CHAT_ID,
-                "text":                     text,
-                "parse_mode":               "Markdown",
-                "disable_web_page_preview": True,
-            },
-            timeout=10,
-        )
-        if r.ok:
-            print(f"  ✈ Telegram message sent")
-        else:
-            print(f"  ⚠ Telegram error: {r.text}")
+def product_line(p):
+    emoji = STATUS_EMOJI.get(p["status"],"❓")
+    price = f" · {p['price']}" if p.get("price") else ""
+    title = p["title"][:50] + ("…" if len(p["title"]) > 50 else "")
+    return f"    {emoji} [{title}]({p['url']}){price}"
 
-def build_telegram_messages(all_results, new_in_stock):
-    """
-    all_results: {set_name: {site_name: [products]}}
-    new_in_stock: same structure but only newly in-stock items
-    Returns list of message strings (Telegram has 4096 char limit).
-    """
-    messages = []
+def send_telegram(text):
+    r = requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={
+            "chat_id":                  TELEGRAM_CHAT_ID,
+            "text":                     text,
+            "parse_mode":               "Markdown",
+            "disable_web_page_preview": True,
+        },
+        timeout=10,
+    )
+    if r.ok:
+        print("  ✈ Telegram sent")
+    else:
+        print(f"  ⚠ Telegram error: {r.status_code} {r.text[:200]}")
 
-    # --- Alert message for newly in-stock items ---
-    if new_in_stock:
-        lines = ["🚨 *New Pokémon Stock Alert!*\n"]
-        for set_name, sites in new_in_stock.items():
-            lines.append(f"*{set_name}*")
-            for site_name, products in sites.items():
-                lines.append(f"  📦 {site_name}")
-                for p in products:
-                    price = f" · {p['price']}" if p.get("price") else ""
-                    title = p["title"][:55] + ("…" if len(p["title"]) > 55 else "")
-                    lines.append(f"    ✅ [{title}]({p['url']}){price}")
-            lines.append("")
-        lines.append(f"_Checked at {datetime.utcnow().strftime('%H:%M UTC')}_")
-        messages.append("\n".join(lines))
-
-    # --- Full status digest (sent every run so you always know the state) ---
-    lines = [f"📊 *Full Stock Digest* — {datetime.utcnow().strftime('%H:%M UTC')}\n"]
-    for set_name, sites in all_results.items():
+def send_alert(new_in_stock):
+    lines = ["🚨 *Pokémon Restock Alert!*\n"]
+    for set_name, sites in new_in_stock.items():
         lines.append(f"*{set_name}*")
         for site_name, products in sites.items():
-            if not products:
-                lines.append(f"  {site_name}: nothing found")
-                continue
             lines.append(f"  📦 {site_name}")
             for p in products:
-                emoji = STATUS_EMOJI.get(p["status"], "❓")
-                price = f" · {p['price']}" if p.get("price") else ""
-                title = p["title"][:50] + ("…" if len(p["title"]) > 50 else "")
-                lines.append(f"    {emoji} [{title}]({p['url']}){price}")
+                lines.append(product_line(p))
         lines.append("")
+    lines.append(f"_Checked {datetime.utcnow().strftime('%H:%M UTC')}_")
+    send_telegram("\n".join(lines))
 
-    # Split into chunks under 4000 chars
-    chunk, chunk_len = [], 0
-    for line in lines:
-        if chunk_len + len(line) > 3800:
-            messages.append("\n".join(chunk))
-            chunk, chunk_len = [], 0
-        chunk.append(line)
-        chunk_len += len(line) + 1
-    if chunk:
-        messages.append("\n".join(chunk))
+def send_digest(all_results):
+    ts = datetime.utcnow().strftime("%H:%M UTC")
+    for set_name, sites in all_results.items():
+        lines = [f"📊 *{set_name}* — {ts}\n"]
+        has_content = False
+        for site_name, products in sites.items():
+            if not products:
+                lines.append(f"  _{site_name}: nothing found_")
+                continue
+            has_content = True
+            lines.append(f"  📦 *{site_name}*")
+            for p in sorted(products,
+                            key=lambda x: 0 if x["status"]=="in_stock" else 1):
+                lines.append(product_line(p))
+            lines.append("")
 
-    return messages
+        if has_content:
+            text = "\n".join(lines)
+            if len(text) > 3800:
+                mid = len(lines) // 2
+                send_telegram("\n".join(lines[:mid]))
+                send_telegram("\n".join(lines[mid:]))
+            else:
+                send_telegram(text)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -353,9 +426,6 @@ def save_state(state):
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
 
-def state_key(site, set_name):
-    return f"{site['domain']}|{set_name}"
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MAIN
@@ -366,42 +436,42 @@ def main():
     print(f"   Sets:  {', '.join(SETS)}")
     print(f"   Sites: {', '.join(s['name'] for s in SITES)}\n")
 
-    state       = load_state()
-    all_results = {}   # {set_name: {site_name: [products]}}
-    new_in_stock = {}  # same, but only newly in-stock products
+    state        = load_state()
+    all_results  = {}
+    new_in_stock = {}
 
     for set_name in SETS:
         print(f"══ {set_name} ══")
         all_results[set_name] = {}
+
         for site in SITES:
+            print(f"  {site['name']}...")
             products = check_site_for_set(site, set_name)
             all_results[set_name][site["name"]] = products
 
-            # Diff against previous state
-            key = state_key(site, set_name)
-            prev_in_stock_urls = set(state.get(key, {}).get("in_stock_urls", []))
-            now_in_stock_urls  = {p["url"] for p in products if p["status"] == "in_stock"}
-
-            newly = [p for p in products
-                     if p["status"] == "in_stock" and p["url"] not in prev_in_stock_urls]
-
+            key           = f"{site['domain']}|{set_name}"
+            prev_in_stock = set(state.get(key, {}).get("in_stock_urls", []))
+            now_in_stock  = {p["url"] for p in products if p["status"] == "in_stock"}
+            newly         = [p for p in products
+                             if p["status"] == "in_stock"
+                             and p["url"] not in prev_in_stock]
             if newly:
                 new_in_stock.setdefault(set_name, {})[site["name"]] = newly
 
-            # Save state
             state[key] = {
-                "in_stock_urls":  list(now_in_stock_urls),
-                "all_urls":       [p["url"] for p in products],
-                "last_checked":   datetime.utcnow().isoformat(),
+                "in_stock_urls": list(now_in_stock),
+                "last_checked":  datetime.utcnow().isoformat(),
             }
         print()
 
     save_state(state)
 
-    messages = build_telegram_messages(all_results, new_in_stock)
-    if messages:
-        print("📨 Sending Telegram update...")
-        send_telegram(messages)
+    if new_in_stock:
+        print("🚨 New stock found! Sending alert...")
+        send_alert(new_in_stock)
+
+    print("📊 Sending digest...")
+    send_digest(all_results)
 
 if __name__ == "__main__":
     main()
