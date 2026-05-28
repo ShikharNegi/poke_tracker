@@ -102,7 +102,7 @@ def scrape_search_results(site, set_name):
     if not template:
         return []
 
-    search_url = template.format(query=requests.utils.quote(set_name))
+    search_url = template.format(query=requests.utils.quote(set_name, safe="").replace("%20", "+"))
     r = fetch(search_url)
 
     if not r or is_blocked(r) or not r.ok:
