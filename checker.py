@@ -314,22 +314,27 @@ def main():
     all_results  = {s: {site["name"]: [] for site in SITES} for s in SETS}
     new_in_stock = {}
 
-    # Build all (site, set_name) tasks
-    tasks = [(site, set_name) for set_name in SETS for site in SITES]
+    # One worker per site — each site is checked sequentially (no hammering)
+    # but all 5 sites run in parallel with each other
+    def check_all_sets_for_site(site):
+        results = []
+        for set_name in SETS:
+            site_name, sn, products = check_site_for_set(site, set_name)
+            results.append((site_name, sn, products))
+        return results
 
-    # Run all in parallel — max 5 workers (one per site) to avoid hammering
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    with ThreadPoolExecutor(max_workers=len(SITES)) as executor:
         futures = {
-            executor.submit(check_site_for_set, site, set_name): (site, set_name)
-            for site, set_name in tasks
+            executor.submit(check_all_sets_for_site, site): site
+            for site in SITES
         }
         for future in as_completed(futures):
+            site = futures[future]
             try:
-                site_name, set_name, products = future.result()
-                all_results[set_name][site_name] = products
+                for site_name, set_name, products in future.result():
+                    all_results[set_name][site_name] = products
             except Exception as e:
-                site, set_name = futures[future]
-                print(f"  ⚠ Error checking {site['name']} for {set_name}: {e}")
+                print(f"  ⚠ Error checking {site['name']}: {e}")
 
     # Diff against state and find newly in-stock items
     for set_name in SETS:
