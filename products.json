@@ -18,7 +18,7 @@
     {
       "name": "Easons",
       "domain": "easons.com",
-      "search_url": "https://www.easons.com/catalogsearch/result/?q={query}"
+      "search_url": "https://www.easons.com/search?q={query}"
     },
     {
       "name": "Arts and Hobbies",
