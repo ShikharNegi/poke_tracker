@@ -1,19 +1,65 @@
 {
-  "products": [
+  "sets": [
+    "Pokemon Chaos Rising",
+    "Pokemon Pitch Black",
+    "Pokemon Destined Rivals",
+    "Pokemon Prismatic Evolutions",
+    "Pokemon Ascended Heroes",
+    "Pokemon Mega Evolution",
+    "Pokemon Mega Evolution Phantasmal Flames",
+    "Pokemon Perfect Order",
+    "Pokemon ex",
+    "Pokemon TCG",
+    "Pokemon Trading Cards"
+  ],
+
+  "sites": [
     {
-      "name": "Scarlet & Violet Booster Box",
-      "site": "smythstoys.com",
-      "url": "https://www.smythstoys.com/ie/en-ie/example-url"
+      "name": "Smyths",
+      "domain": "smythstoys.com",
+      "method": "page",
+      "urls": [
+        "https://www.smythstoys.com/ie/en-ie/brand/pokemon/pokemon-trading-card-game/pokemon-trading-card-game-tcg-mega-evolution-chaos-rising-booster-pack-assortment/p/259975",
+        "https://www.smythstoys.com/ie/en-ie/brand/pokemon/pokemon-trading-card-game/pokemon-trading-card-game-tcg-mega-evolution-chaos-rising-booster-3-pack/p/259993",
+        "https://www.smythstoys.com/ie/en-ie/brand/pokemon/pokemon-trading-card-game/pokemon-trading-card-game-tcg-mega-evolution-chaos-rising-elite-trainer-box/p/260004",
+        "https://www.smythstoys.com/ie/en-ie/brand/pokemon/pokemon-trading-card-game/pokemon-trading-card-game-tcg-mega-evolution-chaos-rising-booster-bundle/p/260005"
+      ],
+      "note": "Paste your Smyths product URLs here. Add one per line. Smyths keeps OOS pages live so we check each URL directly."
     },
     {
-      "name": "Prismatic Evolutions Elite Trainer Box",
-      "site": "argos.ie",
-      "url": "https://www.argos.ie/product/example-url"
+      "name": "Toyful",
+      "domain": "toyful.ie",
+      "method": "search",
+      "search_url": "https://www.toyful.ie/search?q={query}",
+      "note": "Removes OOS listings — script searches, finds products, checks each one"
     },
     {
-      "name": "Surging Sparks Booster Box",
-      "site": "gamestop.ie",
-      "url": "https://www.gamestop.ie/example-url"
+      "name": "Easons",
+      "domain": "easons.com",
+      "method": "search",
+      "search_url": "https://www.easons.com/catalogsearch/result/?q={query}",
+      "note": "Removes OOS listings"
+    },
+    {
+      "name": "Arts and Hobbies",
+      "domain": "artsandhobbies.ie",
+      "method": "search",
+      "search_url": "https://www.artsandhobbies.ie/search?q={query}",
+      "note": "Removes OOS listings"
+    },
+    {
+      "name": "Eire Hobbies",
+      "domain": "eirehobbies.com",
+      "method": "search",
+      "search_url": "https://www.eirehobbies.com/search?q={query}",
+      "note": "Removes OOS listings"
+    },
+    {
+      "name": "Discarded",
+      "domain": "discarded.ie",
+      "method": "search",
+      "search_url": "https://www.discarded.ie/search?q={query}",
+      "note": "Sometimes shows OOS — script checks each product page individually"
     }
   ]
 }

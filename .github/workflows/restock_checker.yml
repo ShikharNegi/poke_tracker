@@ -2,10 +2,8 @@ name: Pokémon Restock Checker
 
 on:
   schedule:
-    # Runs every hour — adjust timing if you want more/less frequent checks
-    # Format: minute hour day month weekday (UTC time)
-    - cron: "0 * * * *"
-  workflow_dispatch:  # also allows manual trigger from GitHub UI
+    - cron: "0 * * * *"  # every hour
+  workflow_dispatch:      # manual trigger from GitHub UI
 
 jobs:
   check-stock:
@@ -33,9 +31,8 @@ jobs:
 
       - name: Run restock checker
         env:
-          NOTIFY_EMAIL:  ${{ secrets.NOTIFY_EMAIL }}
-          SMTP_EMAIL:    ${{ secrets.SMTP_EMAIL }}
-          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python checker.py
 
       - name: Save updated state
