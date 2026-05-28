@@ -5,7 +5,8 @@ import time
 import random
 import requests
 from bs4 import BeautifulSoup
-from datetime import datetime
+from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 with open("products.json") as f:
     config = json.load(f)
@@ -36,13 +37,12 @@ def get_headers():
     }
 
 def fetch(url, timeout=20, retries=3):
-    """Fetch with retries and backoff."""
     for attempt in range(retries):
         try:
-            time.sleep(random.uniform(3, 8))  # polite delay
+            time.sleep(random.uniform(1, 3))
             r = requests.get(url, headers=get_headers(), timeout=timeout)
             if r.status_code == 429:
-                wait = (attempt + 1) * 15
+                wait = (attempt + 1) * 10
                 print(f"      ⏳ Rate limited, waiting {wait}s...")
                 time.sleep(wait)
                 continue
@@ -51,7 +51,7 @@ def fetch(url, timeout=20, retries=3):
             if attempt == retries - 1:
                 print(f"      ⚠ Fetch failed after {retries} attempts: {e}")
                 return None
-            time.sleep((attempt + 1) * 10)
+            time.sleep((attempt + 1) * 5)
     return None
 
 def is_blocked(r):
@@ -94,7 +94,7 @@ CARD_SELECTORS = [
 ]
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SEARCH PAGE SCRAPING
+# SEARCH + PRODUCT PAGE CHECKS
 # ══════════════════════════════════════════════════════════════════════════════
 
 def scrape_search_results(site, set_name):
@@ -106,7 +106,7 @@ def scrape_search_results(site, set_name):
     r = fetch(search_url)
 
     if not r or is_blocked(r) or not r.ok:
-        print(f"      ⚠ Search failed ({r.status_code if r else 'no response'})")
+        print(f"      ⚠ [{site['name']}] Search failed ({r.status_code if r else 'no response'})")
         return []
 
     soup = BeautifulSoup(r.text, "html.parser")
@@ -143,7 +143,6 @@ def scrape_search_results(site, set_name):
         if products:
             break
 
-    # Fallback: matching <a> tags
     if not products:
         for a in soup.find_all("a", href=True):
             url = absolute_url(a["href"], domain)
@@ -156,10 +155,6 @@ def scrape_search_results(site, set_name):
 
     return products
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# INDIVIDUAL PRODUCT PAGE CHECK
-# ══════════════════════════════════════════════════════════════════════════════
 
 def get_page_stock_status(site, url):
     r = fetch(url)
@@ -181,7 +176,7 @@ def get_page_stock_status(site, url):
         m = re.search(r"€[\d,]+\.?\d*", price_tag.get_text())
         price = m.group(0) if m else ""
 
-    # Shopify sites (Eire Hobbies, Discarded, Toyful)
+    # Shopify sites
     if any(d in domain for d in ["eirehobbies","discarded","toyful"]):
         sold = (soup.find(class_=re.compile(r"sold.?out", re.I)) or
                 soup.find("button", string=re.compile(r"sold out", re.I)) or
@@ -193,7 +188,6 @@ def get_page_stock_status(site, url):
             return "in_stock", price
         return "unknown", price
 
-    # Generic
     for sig in OUT_SIGNALS:
         if sig in text:
             return "out_of_stock", price
@@ -203,19 +197,16 @@ def get_page_stock_status(site, url):
     return "unknown", price
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# MAIN CHECK
-# ══════════════════════════════════════════════════════════════════════════════
-
 def check_site_for_set(site, set_name):
-    print(f"    🔎 Searching {site['name']} for '{set_name}'...")
+    """Check one site for one set. Returns (site_name, set_name, products)."""
+    print(f"  🔎 [{site['name']}] Searching '{set_name}'...")
     found = scrape_search_results(site, set_name)
 
     if not found:
-        print("       No products found")
-        return []
+        print(f"  ❌ [{site['name']}] Nothing found for '{set_name}'")
+        return site["name"], set_name, []
 
-    print(f"       Found {len(found)} product(s), checking each...")
+    print(f"  📋 [{site['name']}] Found {len(found)} product(s) for '{set_name}', checking stock...")
     products = []
     for p in found:
         status, price = get_page_stock_status(site, p["url"])
@@ -223,9 +214,10 @@ def check_site_for_set(site, set_name):
             p["price"] = price
         p["status"] = status
         icon = {"in_stock":"✅","out_of_stock":"❌"}.get(status, "❓")
-        print(f"      {icon} {p['title'][:60]} — {p.get('price') or 'no price'}")
+        print(f"    {icon} [{site['name']}] {p['title'][:55]} — {p.get('price') or 'no price'}")
         products.append(p)
-    return products
+
+    return site["name"], set_name, products
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -265,11 +257,11 @@ def send_alert(new_in_stock):
             for p in products:
                 lines.append(product_line(p))
         lines.append("")
-    lines.append(f"_Checked {datetime.utcnow().strftime('%H:%M UTC')}_")
+    lines.append(f"_Checked {datetime.now(timezone.utc).strftime('%H:%M UTC')}_")
     send_telegram("\n".join(lines))
 
 def send_digest(all_results):
-    ts = datetime.utcnow().strftime("%H:%M UTC")
+    ts = datetime.now(timezone.utc).strftime("%H:%M UTC")
     for set_name, sites in all_results.items():
         lines = [f"📊 *{set_name}* — {ts}\n"]
         has_content = False
@@ -309,27 +301,40 @@ def save_state(state):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# MAIN
+# MAIN — runs all site+set combinations in parallel
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main():
-    print(f"\n🔍 Pokémon Restock Checker — {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
+    print(f"\n🔍 Pokémon Restock Checker — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
     print(f"   Sets:  {', '.join(SETS)}")
-    print(f"   Sites: {', '.join(s['name'] for s in SITES)}\n")
+    print(f"   Sites: {', '.join(s['name'] for s in SITES)}")
+    print(f"   Running {len(SETS) * len(SITES)} checks in parallel...\n")
 
     state        = load_state()
-    all_results  = {}
+    all_results  = {s: {site["name"]: [] for site in SITES} for s in SETS}
     new_in_stock = {}
 
+    # Build all (site, set_name) tasks
+    tasks = [(site, set_name) for set_name in SETS for site in SITES]
+
+    # Run all in parallel — max 5 workers (one per site) to avoid hammering
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {
+            executor.submit(check_site_for_set, site, set_name): (site, set_name)
+            for site, set_name in tasks
+        }
+        for future in as_completed(futures):
+            try:
+                site_name, set_name, products = future.result()
+                all_results[set_name][site_name] = products
+            except Exception as e:
+                site, set_name = futures[future]
+                print(f"  ⚠ Error checking {site['name']} for {set_name}: {e}")
+
+    # Diff against state and find newly in-stock items
     for set_name in SETS:
-        print(f"══ {set_name} ══")
-        all_results[set_name] = {}
-
         for site in SITES:
-            print(f"  {site['name']}...")
-            products = check_site_for_set(site, set_name)
-            all_results[set_name][site["name"]] = products
-
+            products = all_results[set_name][site["name"]]
             key           = f"{site['domain']}|{set_name}"
             prev_in_stock = set(state.get(key, {}).get("in_stock_urls", []))
             now_in_stock  = {p["url"] for p in products if p["status"] == "in_stock"}
@@ -341,17 +346,16 @@ def main():
 
             state[key] = {
                 "in_stock_urls": list(now_in_stock),
-                "last_checked":  datetime.utcnow().isoformat(),
+                "last_checked":  datetime.now(timezone.utc).isoformat(),
             }
-        print()
 
     save_state(state)
 
     if new_in_stock:
-        print("🚨 New stock found! Sending alert...")
+        print("\n🚨 New stock found! Sending alert...")
         send_alert(new_in_stock)
 
-    print("📊 Sending digest...")
+    print("\n📊 Sending digest...")
     send_digest(all_results)
 
 if __name__ == "__main__":

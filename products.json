@@ -23,7 +23,7 @@
     {
       "name": "Arts and Hobbies",
       "domain": "artsandhobbies.ie",
-      "search_url": "https://www.artsandhobbies.ie/search?q={query}"
+      "search_url": "https://www.artnhobby.ie/search?q={query}"
     },
     {
       "name": "Eire Hobbies",
