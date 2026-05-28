@@ -275,7 +275,7 @@ def send_digest(all_results):
                 lines.append(product_line(p))
             lines.append("")
 
-        if has_content:
+        # Always send, even if all sites returned nothing
             text = "\n".join(lines)
             if len(text) > 3800:
                 mid = len(lines) // 2
