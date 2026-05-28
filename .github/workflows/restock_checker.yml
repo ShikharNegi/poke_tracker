@@ -2,8 +2,8 @@ name: Pokémon Restock Checker
 
 on:
   schedule:
-    - cron: "*/15 * * * *"  # every 15 minutes
-  workflow_dispatch:          # manual trigger from GitHub UI
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true

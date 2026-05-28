@@ -21,6 +21,7 @@ USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
 ]
 
 def get_headers():
@@ -34,17 +35,32 @@ def get_headers():
         "Cache-Control":             "max-age=0",
     }
 
-def is_bot_blocked(r):
-    if not r or r.status_code in (403, 429, 503):
+def fetch(url, timeout=20, retries=3):
+    """Fetch with retries and backoff."""
+    for attempt in range(retries):
+        try:
+            time.sleep(random.uniform(3, 8))  # polite delay
+            r = requests.get(url, headers=get_headers(), timeout=timeout)
+            if r.status_code == 429:
+                wait = (attempt + 1) * 15
+                print(f"      ⏳ Rate limited, waiting {wait}s...")
+                time.sleep(wait)
+                continue
+            return r
+        except Exception as e:
+            if attempt == retries - 1:
+                print(f"      ⚠ Fetch failed after {retries} attempts: {e}")
+                return None
+            time.sleep((attempt + 1) * 10)
+    return None
+
+def is_blocked(r):
+    if not r or r.status_code in (403, 503):
         return True
     return any(p in r.text.lower() for p in [
-        "pardon our interruption", "access denied",
-        "please verify you are a human", "too many requests",
-        "ddos-guard", "are you a robot",
+        "access denied", "please verify you are a human",
+        "too many requests", "are you a robot", "ddos-guard",
     ])
-
-def polite_delay():
-    time.sleep(random.uniform(1.5, 3.5))
 
 def keywords_from_set(set_name):
     stopwords = {"the","a","an","and","or","for","of","in","to","&",
@@ -77,154 +93,20 @@ CARD_SELECTORS = [
     ".grid-product",".collection-product",".item",
 ]
 
-
 # ══════════════════════════════════════════════════════════════════════════════
-# SMYTHS SESSION — visits homepage first to get cookies, then searches
-# ══════════════════════════════════════════════════════════════════════════════
-
-def make_smyths_session():
-    """Create a requests session that looks like a real browser to Smyths."""
-    session = requests.Session()
-    session.headers.update(get_headers())
-    try:
-        print("      🍪 Getting Smyths cookies...")
-        session.get("https://www.smythstoys.com/ie/en-ie/",
-                    timeout=15, allow_redirects=True)
-        polite_delay()
-        session.headers["Referer"] = "https://www.smythstoys.com/ie/en-ie/"
-    except Exception as e:
-        print(f"      ⚠ Could not load Smyths homepage: {e}")
-    return session
-
-def smyths_search(session, set_name):
-    """Search Smyths and return product cards matching the set name."""
-    search_url = f"https://www.smythstoys.com/ie/en-ie/search?text={requests.utils.quote(set_name)}"
-    try:
-        r = session.get(search_url, timeout=20)
-    except Exception as e:
-        print(f"      ⚠ Smyths search error: {e}")
-        return []
-
-    if is_bot_blocked(r):
-        print("      🚫 Smyths is blocking — will retry next run")
-        return []
-
-    soup = BeautifulSoup(r.text, "html.parser")
-    for tag in soup.select("nav,header,footer,script,style,noscript"):
-        tag.decompose()
-
-    products  = []
-    seen_urls = set()
-
-    # Smyths uses <li class="product ..."> cards
-    for sel in CARD_SELECTORS:
-        cards = soup.select(sel)
-        if not cards:
-            continue
-        for card in cards:
-            card_text = card.get_text(" ", strip=True)
-            if not text_matches(card_text, set_name):
-                continue
-            link = card.find("a", href=True)
-            url  = absolute_url(link["href"] if link else None, "smythstoys.com")
-            if not url or url in seen_urls:
-                continue
-            title_tag = card.find(["h2","h3","h4"]) or card.find("a")
-            title = title_tag.get_text(strip=True) if title_tag else card_text[:80]
-            price_tag = card.find(class_=re.compile(r"price", re.I))
-            price = ""
-            if price_tag:
-                m = re.search(r"€[\d,]+\.?\d*", price_tag.get_text())
-                price = m.group(0) if m else ""
-            seen_urls.add(url)
-            products.append({"title": title, "url": url, "price": price})
-        if products:
-            break
-
-    # Fallback to matching <a> tags
-    if not products:
-        for a in soup.find_all("a", href=True):
-            url = absolute_url(a["href"], "smythstoys.com")
-            if not url or url in seen_urls:
-                continue
-            link_text = a.get_text(strip=True)
-            if text_matches(link_text, set_name) and len(link_text) > 15:
-                seen_urls.add(url)
-                products.append({"title": link_text, "url": url, "price": ""})
-
-    return products
-
-def smyths_check_product(session, product):
-    """Fetch individual Smyths product page and get stock status."""
-    polite_delay()
-    try:
-        r = session.get(product["url"], timeout=20)
-    except Exception as e:
-        print(f"      ⚠ Error: {e}")
-        product["status"] = "unknown"
-        return product
-
-    if is_bot_blocked(r):
-        product["status"] = "blocked"
-        return product
-
-    soup = BeautifulSoup(r.text, "html.parser")
-
-    # Update price from product page if we didn't get it from search
-    if not product.get("price"):
-        price_tag = soup.find("span", class_=re.compile(r"price", re.I))
-        if price_tag:
-            m = re.search(r"€[\d,]+\.?\d*", price_tag.get_text())
-            product["price"] = m.group(0) if m else ""
-
-    btn = soup.find("button", {"id": "addToCartBtn"})
-    if btn:
-        product["status"] = "out_of_stock" if btn.get("disabled") else "in_stock"
-    elif soup.find(string=lambda t: t and "out of stock" in t.lower()):
-        product["status"] = "out_of_stock"
-    else:
-        product["status"] = "unknown"
-
-    return product
-
-def check_smyths_for_set(set_name):
-    session  = make_smyths_session()
-    print(f"    🔎 Searching Smyths for '{set_name}'...")
-    products = smyths_search(session, set_name)
-
-    if not products:
-        print("       No products found")
-        return []
-
-    print(f"       Found {len(products)} product(s), checking each...")
-    results = []
-    for p in products:
-        p = smyths_check_product(session, p)
-        icon = {"in_stock":"✅","out_of_stock":"❌","blocked":"🚫"}.get(p["status"],"❓")
-        print(f"      {icon} {p['title'][:60]} — {p.get('price') or 'no price'}")
-        results.append(p)
-    return results
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# GENERIC SEARCH-BASED SITES
+# SEARCH PAGE SCRAPING
 # ══════════════════════════════════════════════════════════════════════════════
 
 def scrape_search_results(site, set_name):
-    template = site.get("search_url","")
+    template = site.get("search_url", "")
     if not template:
         return []
 
     search_url = template.format(query=requests.utils.quote(set_name))
-    polite_delay()
-    try:
-        r = requests.get(search_url, headers=get_headers(), timeout=20)
-    except Exception as e:
-        print(f"      ⚠ Fetch error: {e}")
-        return []
+    r = fetch(search_url)
 
-    if is_bot_blocked(r) or not r.ok:
-        print(f"      ⚠ Search blocked or failed ({r.status_code if r else 'no response'})")
+    if not r or is_blocked(r) or not r.ok:
+        print(f"      ⚠ Search failed ({r.status_code if r else 'no response'})")
         return []
 
     soup = BeautifulSoup(r.text, "html.parser")
@@ -248,10 +130,10 @@ def scrape_search_results(site, set_name):
             if not url or url in seen_urls:
                 continue
             title_tag = (card.find(["h2","h3","h4"]) or
-                         card.find(class_=re.compile(r"title|name",re.I)) or
+                         card.find(class_=re.compile(r"title|name", re.I)) or
                          card.find("a"))
             title = title_tag.get_text(strip=True) if title_tag else card_text[:80]
-            price_tag = card.find(class_=re.compile(r"price",re.I))
+            price_tag = card.find(class_=re.compile(r"price", re.I))
             price = ""
             if price_tag:
                 m = re.search(r"€[\d,]+\.?\d*", price_tag.get_text())
@@ -261,6 +143,7 @@ def scrape_search_results(site, set_name):
         if products:
             break
 
+    # Fallback: matching <a> tags
     if not products:
         for a in soup.find_all("a", href=True):
             url = absolute_url(a["href"], domain)
@@ -273,16 +156,19 @@ def scrape_search_results(site, set_name):
 
     return products
 
-def get_page_stock_status(site, url):
-    polite_delay()
-    try:
-        r = requests.get(url, headers=get_headers(), timeout=20)
-    except Exception as e:
-        return "unknown", ""
 
-    if not r or r.status_code in (404, 410):
+# ══════════════════════════════════════════════════════════════════════════════
+# INDIVIDUAL PRODUCT PAGE CHECK
+# ══════════════════════════════════════════════════════════════════════════════
+
+def get_page_stock_status(site, url):
+    r = fetch(url)
+
+    if not r:
+        return "unknown", ""
+    if r.status_code in (404, 410):
         return "out_of_stock", ""
-    if is_bot_blocked(r) or not r.ok:
+    if is_blocked(r) or not r.ok:
         return "unknown", ""
 
     soup   = BeautifulSoup(r.text, "html.parser")
@@ -290,17 +176,17 @@ def get_page_stock_status(site, url):
     text   = soup.get_text().lower()
 
     price = ""
-    price_tag = soup.find(class_=re.compile(r"(^|\b)price(\b|$)",re.I))
+    price_tag = soup.find(class_=re.compile(r"(^|\b)price(\b|$)", re.I))
     if price_tag:
         m = re.search(r"€[\d,]+\.?\d*", price_tag.get_text())
         price = m.group(0) if m else ""
 
-    # Shopify sites (Eire Hobbies, Discarded, Toyful etc.)
+    # Shopify sites (Eire Hobbies, Discarded, Toyful)
     if any(d in domain for d in ["eirehobbies","discarded","toyful"]):
-        sold = (soup.find(class_=re.compile(r"sold.?out",re.I)) or
-                soup.find("button", string=re.compile(r"sold out",re.I)) or
+        sold = (soup.find(class_=re.compile(r"sold.?out", re.I)) or
+                soup.find("button", string=re.compile(r"sold out", re.I)) or
                 soup.find(string=lambda t: t and "sold out" in t.lower()))
-        atc  = soup.find("button", string=re.compile(r"add to cart",re.I))
+        atc  = soup.find("button", string=re.compile(r"add to cart", re.I))
         if sold:
             return "out_of_stock", price
         if atc and not atc.get("disabled"):
@@ -316,9 +202,15 @@ def get_page_stock_status(site, url):
             return "in_stock", price
     return "unknown", price
 
-def check_search_site_for_set(site, set_name):
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MAIN CHECK
+# ══════════════════════════════════════════════════════════════════════════════
+
+def check_site_for_set(site, set_name):
     print(f"    🔎 Searching {site['name']} for '{set_name}'...")
     found = scrape_search_results(site, set_name)
+
     if not found:
         print("       No products found")
         return []
@@ -330,30 +222,20 @@ def check_search_site_for_set(site, set_name):
         if not p["price"] and price:
             p["price"] = price
         p["status"] = status
-        icon = {"in_stock":"✅","out_of_stock":"❌"}.get(status,"❓")
+        icon = {"in_stock":"✅","out_of_stock":"❌"}.get(status, "❓")
         print(f"      {icon} {p['title'][:60]} — {p.get('price') or 'no price'}")
         products.append(p)
     return products
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# DISPATCHER
-# ══════════════════════════════════════════════════════════════════════════════
-
-def check_site_for_set(site, set_name):
-    if "smythstoys" in site["domain"]:
-        return check_smyths_for_set(set_name)
-    return check_search_site_for_set(site, set_name)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
 # TELEGRAM
 # ══════════════════════════════════════════════════════════════════════════════
 
-STATUS_EMOJI = {"in_stock":"✅","out_of_stock":"❌","blocked":"🚫","unknown":"❓"}
+STATUS_EMOJI = {"in_stock":"✅","out_of_stock":"❌","unknown":"❓"}
 
 def product_line(p):
-    emoji = STATUS_EMOJI.get(p["status"],"❓")
+    emoji = STATUS_EMOJI.get(p["status"], "❓")
     price = f" · {p['price']}" if p.get("price") else ""
     title = p["title"][:50] + ("…" if len(p["title"]) > 50 else "")
     return f"    {emoji} [{title}]({p['url']}){price}"
@@ -397,8 +279,7 @@ def send_digest(all_results):
                 continue
             has_content = True
             lines.append(f"  📦 *{site_name}*")
-            for p in sorted(products,
-                            key=lambda x: 0 if x["status"]=="in_stock" else 1):
+            for p in sorted(products, key=lambda x: 0 if x["status"] == "in_stock" else 1):
                 lines.append(product_line(p))
             lines.append("")
 

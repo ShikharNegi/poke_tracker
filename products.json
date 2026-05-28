@@ -9,12 +9,7 @@
     "Pokemon Mega Evolution Phantasmal Flames"
   ],
 
-   "sites": [
-    {
-      "name": "Smyths",
-      "domain": "smythstoys.com",
-      "note": "Uses a browser session to bypass bot detection, then searches like other sites"
-    },
+  "sites": [
     {
       "name": "Toyful",
       "domain": "toyful.ie",
