@@ -36,13 +36,13 @@ def get_headers():
         "Cache-Control":             "max-age=0",
     }
 
-def fetch(url, timeout=20, retries=3):
+def fetch(url, timeout=30, retries=3):
     for attempt in range(retries):
         try:
-            time.sleep(random.uniform(1, 3))
+            time.sleep(random.uniform(2, 5))
             r = requests.get(url, headers=get_headers(), timeout=timeout)
             if r.status_code == 429:
-                wait = (attempt + 1) * 10
+                wait = (attempt + 1) * 15
                 print(f"      ⏳ Rate limited, waiting {wait}s...")
                 time.sleep(wait)
                 continue
@@ -81,20 +81,30 @@ def absolute_url(href, domain):
         return f"https://www.{domain}{href}"
     return None
 
-OUT_SIGNALS = ["out of stock","sold out","unavailable",
-               "notify me when available","currently unavailable",
+OUT_SIGNALS = ["out of stock", "sold out", "unavailable",
+               "notify me when available", "currently unavailable",
                "temporarily out of stock"]
-IN_SIGNALS  = ["add to cart","add to basket","add to trolley","add to bag","buy now"]
+IN_SIGNALS  = ["add to cart", "add to basket", "add to trolley", "add to bag", "buy now"]
 
-CARD_SELECTORS = [
-    ".product-tile",".product-card",".product-item",
-    "[class*='product-tile']","[class*='product-card']","[class*='product-item']",
-    "article[class*='product']","li[class*='item']","li[class*='product']",
-    ".grid-product",".collection-product",".item",
+# Site-specific card selectors
+SITE_CARD_SELECTORS = {
+    "toyful.ie":         ["li.grid__item", ".grid__item", "li[class*='grid']", ".product-item"],
+    "eirehobbies.com":   ["li.grid__item", ".grid__item", ".product-item"],
+    "discarded.ie":      ["li.grid__item", ".grid__item", ".product-item"],
+    "easons.com":        [".product-item", ".item", "li.item", ".product-card"],
+    "artsandhobbies.ie": [".product-item", ".item", ".product-card", ".grid__item"],
+}
+
+GENERIC_CARD_SELECTORS = [
+    ".product-tile", ".product-card", ".product-item",
+    "[class*='product-tile']", "[class*='product-card']", "[class*='product-item']",
+    "article[class*='product']", "li[class*='item']", "li[class*='product']",
+    ".grid-product", ".collection-product", ".grid__item", ".item",
 ]
 
+
 # ══════════════════════════════════════════════════════════════════════════════
-# SEARCH + PRODUCT PAGE CHECKS
+# SEARCH PAGE SCRAPING
 # ══════════════════════════════════════════════════════════════════════════════
 
 def scrape_search_results(site, set_name):
@@ -102,7 +112,8 @@ def scrape_search_results(site, set_name):
     if not template:
         return []
 
-    search_url = template.format(query=requests.utils.quote(set_name, safe="").replace("%20", "+"))
+    encoded = requests.utils.quote(set_name, safe="").replace("%20", "+")
+    search_url = template.format(query=encoded)
     r = fetch(search_url)
 
     if not r or is_blocked(r) or not r.ok:
@@ -111,16 +122,21 @@ def scrape_search_results(site, set_name):
 
     soup = BeautifulSoup(r.text, "html.parser")
     domain = site["domain"]
+
     for tag in soup.select("nav,header,footer,script,style,noscript"):
         tag.decompose()
 
     products  = []
     seen_urls = set()
 
-    for sel in CARD_SELECTORS:
+    # Try site-specific selectors first, then generic ones
+    all_selectors = SITE_CARD_SELECTORS.get(domain, []) + GENERIC_CARD_SELECTORS
+
+    for sel in all_selectors:
         cards = soup.select(sel)
         if not cards:
             continue
+        matched = []
         for card in cards:
             card_text = card.get_text(" ", strip=True)
             if not text_matches(card_text, set_name):
@@ -129,20 +145,22 @@ def scrape_search_results(site, set_name):
             url   = absolute_url(link["href"] if link else None, domain)
             if not url or url in seen_urls:
                 continue
-            title_tag = (card.find(["h2","h3","h4"]) or
+            title_tag = (card.find(["h2", "h3", "h4"]) or
                          card.find(class_=re.compile(r"title|name", re.I)) or
                          card.find("a"))
             title = title_tag.get_text(strip=True) if title_tag else card_text[:80]
             price_tag = card.find(class_=re.compile(r"price", re.I))
             price = ""
             if price_tag:
-                m = re.search(r"€[\d,]+\.?\d*", price_tag.get_text())
+                m = re.search(r"€[\d,.]+", price_tag.get_text())
                 price = m.group(0) if m else ""
             seen_urls.add(url)
-            products.append({"title": title, "url": url, "price": price})
-        if products:
+            matched.append({"title": title, "url": url, "price": price})
+        if matched:
+            products = matched
             break
 
+    # Fallback: any <a> tag whose text matches
     if not products:
         for a in soup.find_all("a", href=True):
             url = absolute_url(a["href"], domain)
@@ -156,9 +174,12 @@ def scrape_search_results(site, set_name):
     return products
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# INDIVIDUAL PRODUCT PAGE CHECK
+# ══════════════════════════════════════════════════════════════════════════════
+
 def get_page_stock_status(site, url):
     r = fetch(url)
-
     if not r:
         return "unknown", ""
     if r.status_code in (404, 410):
@@ -173,11 +194,11 @@ def get_page_stock_status(site, url):
     price = ""
     price_tag = soup.find(class_=re.compile(r"(^|\b)price(\b|$)", re.I))
     if price_tag:
-        m = re.search(r"€[\d,]+\.?\d*", price_tag.get_text())
+        m = re.search(r"€[\d,.]+", price_tag.get_text())
         price = m.group(0) if m else ""
 
-    # Shopify sites
-    if any(d in domain for d in ["eirehobbies","discarded","toyful"]):
+    # Shopify sites (Toyful, Eire Hobbies, Discarded)
+    if any(d in domain for d in ["eirehobbies", "discarded", "toyful"]):
         sold = (soup.find(class_=re.compile(r"sold.?out", re.I)) or
                 soup.find("button", string=re.compile(r"sold out", re.I)) or
                 soup.find(string=lambda t: t and "sold out" in t.lower()))
@@ -188,6 +209,7 @@ def get_page_stock_status(site, url):
             return "in_stock", price
         return "unknown", price
 
+    # Generic
     for sig in OUT_SIGNALS:
         if sig in text:
             return "out_of_stock", price
@@ -197,8 +219,11 @@ def get_page_stock_status(site, url):
     return "unknown", price
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# CHECK ONE SITE FOR ONE SET
+# ══════════════════════════════════════════════════════════════════════════════
+
 def check_site_for_set(site, set_name):
-    """Check one site for one set. Returns (site_name, set_name, products)."""
     print(f"  🔎 [{site['name']}] Searching '{set_name}'...")
     found = scrape_search_results(site, set_name)
 
@@ -213,7 +238,7 @@ def check_site_for_set(site, set_name):
         if not p["price"] and price:
             p["price"] = price
         p["status"] = status
-        icon = {"in_stock":"✅","out_of_stock":"❌"}.get(status, "❓")
+        icon = {"in_stock": "✅", "out_of_stock": "❌"}.get(status, "❓")
         print(f"    {icon} [{site['name']}] {p['title'][:55]} — {p.get('price') or 'no price'}")
         products.append(p)
 
@@ -224,7 +249,7 @@ def check_site_for_set(site, set_name):
 # TELEGRAM
 # ══════════════════════════════════════════════════════════════════════════════
 
-STATUS_EMOJI = {"in_stock":"✅","out_of_stock":"❌","unknown":"❓"}
+STATUS_EMOJI = {"in_stock": "✅", "out_of_stock": "❌", "unknown": "❓"}
 
 def product_line(p):
     emoji = STATUS_EMOJI.get(p["status"], "❓")
@@ -264,25 +289,21 @@ def send_digest(all_results):
     ts = datetime.now(timezone.utc).strftime("%H:%M UTC")
     for set_name, sites in all_results.items():
         lines = [f"📊 *{set_name}* — {ts}\n"]
-        has_content = False
         for site_name, products in sites.items():
             if not products:
                 lines.append(f"  _{site_name}: nothing found_")
-                continue
-            has_content = True
-            lines.append(f"  📦 *{site_name}*")
-            for p in sorted(products, key=lambda x: 0 if x["status"] == "in_stock" else 1):
-                lines.append(product_line(p))
-            lines.append("")
-
-        # Always send, even if all sites returned nothing
-            text = "\n".join(lines)
-            if len(text) > 3800:
-                mid = len(lines) // 2
-                send_telegram("\n".join(lines[:mid]))
-                send_telegram("\n".join(lines[mid:]))
             else:
-                send_telegram(text)
+                lines.append(f"  📦 *{site_name}*")
+                for p in sorted(products, key=lambda x: 0 if x["status"] == "in_stock" else 1):
+                    lines.append(product_line(p))
+                lines.append("")
+        text = "\n".join(lines)
+        if len(text) > 3800:
+            mid = len(lines) // 2
+            send_telegram("\n".join(lines[:mid]))
+            send_telegram("\n".join(lines[mid:]))
+        else:
+            send_telegram(text)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -301,7 +322,7 @@ def save_state(state):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# MAIN — runs all site+set combinations in parallel
+# MAIN
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main():
@@ -314,8 +335,8 @@ def main():
     all_results  = {s: {site["name"]: [] for site in SITES} for s in SETS}
     new_in_stock = {}
 
-    # One worker per site — each site is checked sequentially (no hammering)
-    # but all 5 sites run in parallel with each other
+    # One thread per site — checks all sets sequentially within each site
+    # but all sites run in parallel
     def check_all_sets_for_site(site):
         results = []
         for set_name in SETS:
@@ -336,10 +357,10 @@ def main():
             except Exception as e:
                 print(f"  ⚠ Error checking {site['name']}: {e}")
 
-    # Diff against state and find newly in-stock items
+    # Diff against state
     for set_name in SETS:
         for site in SITES:
-            products = all_results[set_name][site["name"]]
+            products      = all_results[set_name][site["name"]]
             key           = f"{site['domain']}|{set_name}"
             prev_in_stock = set(state.get(key, {}).get("in_stock_urls", []))
             now_in_stock  = {p["url"] for p in products if p["status"] == "in_stock"}
@@ -348,7 +369,6 @@ def main():
                              and p["url"] not in prev_in_stock]
             if newly:
                 new_in_stock.setdefault(set_name, {})[site["name"]] = newly
-
             state[key] = {
                 "in_stock_urls": list(now_in_stock),
                 "last_checked":  datetime.now(timezone.utc).isoformat(),
