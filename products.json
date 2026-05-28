@@ -1,0 +1,19 @@
+{
+  "products": [
+    {
+      "name": "Scarlet & Violet Booster Box",
+      "site": "smythstoys.com",
+      "url": "https://www.smythstoys.com/ie/en-ie/example-url"
+    },
+    {
+      "name": "Prismatic Evolutions Elite Trainer Box",
+      "site": "argos.ie",
+      "url": "https://www.argos.ie/product/example-url"
+    },
+    {
+      "name": "Surging Sparks Booster Box",
+      "site": "gamestop.ie",
+      "url": "https://www.gamestop.ie/example-url"
+    }
+  ]
+}
